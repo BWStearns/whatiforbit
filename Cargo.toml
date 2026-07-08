@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/sim-core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+glam = "0.29"
+hifitime = "4"
+sgp4 = "2"
+chrono = "0.4"
+
+# Bevy is slow to compile unoptimized; keep deps optimized even in dev.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = "s"
+lto = "thin"

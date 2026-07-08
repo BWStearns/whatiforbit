@@ -1,0 +1,10 @@
+[package]
+name = "whatiforbit-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { workspace = true }
+hifitime = { workspace = true }
+sgp4 = { workspace = true }
+chrono = { workspace = true }

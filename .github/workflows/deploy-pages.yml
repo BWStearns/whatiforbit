@@ -1,0 +1,57 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; newer pushes cancel in-progress runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Caches the cargo registry and target dir — Bevy is slow to compile cold.
+      - uses: Swatinem/rust-cache@v2
+
+      # Prebuilt trunk binary (fast); trunk auto-fetches wasm-bindgen + wasm-opt.
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      # --public-url matches the project-site subpath. Kept out of Trunk.toml
+      # so local `trunk serve` still works at http://127.0.0.1:8080/.
+      - name: Build
+        run: trunk build --release --public-url /whatiforbit/
+
+      # Disable Jekyll so Pages serves the dist tree verbatim.
+      - name: Disable Jekyll
+        run: touch dist/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

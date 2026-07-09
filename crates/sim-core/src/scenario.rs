@@ -269,8 +269,8 @@ impl Scenario {
                         requested.min(((mass - veh.dry_mass_kg) / mdot).max(0.0))
                     };
                     let burn_end = (t + achievable).min(self.t_end_s);
+                    let burn_s = (burn_end - t).max(0.0);
                     let mass_before = mass;
-                    let v_before = v;
                     if burn_end > t + 1e-9 && thrust_n > 0.0 && direction_vnc.length() > 0.0 {
                         let arc = ThrustArc {
                             direction_vnc: direction_vnc.normalize(),
@@ -287,8 +287,15 @@ impl Scenario {
                         );
                         t = burn_end;
                     }
-                    let (_, v_after, mass_after) = unpack(&y);
-                    total_dv += (v_after - v_before).length();
+                    let (_, _, mass_after) = unpack(&y);
+                    // Expended delta-v, not net velocity change: |v_after -
+                    // v_before| would fold in gravity's contribution over the
+                    // arc. Constant thrust/mdot gives the exact expressions.
+                    total_dv += if infinite || mdot <= 0.0 {
+                        thrust_n * burn_s / mass_before / 1000.0
+                    } else {
+                        veh.ve_km_s() * (mass_before / mass_after).ln()
+                    };
                     reports.push(ManeuverReport {
                         index,
                         t_offset_s: m.t_offset_s(),

@@ -49,6 +49,13 @@ cargo test -p whatiforbit-sim
 4. **Scrub time** — play/pause and drag the timeline; the readout panel shows live orbital
    elements, altitude, mass, and remaining propellant. Gray = original orbit,
    orange = what-if.
+5. **Target an orbit** — set apoapsis/periapsis altitude and inclination, pick "cheapest"
+   or "fastest", and Solve. The candidate table shows every strategy with its Δv,
+   propellant, duration, and burn count (hover a row to preview it in cyan); the best plan
+   is refined into finite burns against full dynamics, and Apply materializes it into the
+   maneuver list. Unreachable targets report the shortfall (Δv, extra propellant or Isp
+   needed) and offer the closest achievable orbit. See
+   [PLAN-target-orbit.md](PLAN-target-orbit.md) for how optimality is defined.
 
 ## Architecture
 

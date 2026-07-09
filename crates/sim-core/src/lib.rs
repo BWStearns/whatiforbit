@@ -9,11 +9,13 @@
 //! accepted and documented rather than corrected.
 
 pub mod dynamics;
+pub mod earth;
 pub mod elements;
 pub mod integrator;
 pub mod opm;
 pub mod scenario;
 pub mod state;
+pub mod targeting;
 pub mod tle;
 
 pub use elements::{elements_from_rv, OrbitalElements};

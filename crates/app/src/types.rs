@@ -20,6 +20,11 @@ pub enum ManeuverKind {
 /// UI-friendly maneuver row; converted to `whatiforbit_sim::Maneuver` on
 /// recompute. Offsets in minutes and delta-v in m/s to match how people
 /// actually type these numbers.
+///
+/// Maneuvers stack chronologically: `t_offset_min` is minutes after the
+/// *previous maneuver ends* (for the first row: after the scenario epoch),
+/// so a later row can never execute before an earlier one. Absolute times
+/// come from `sim::stacked_start_times_s`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ManeuverInput {
     pub kind: ManeuverKind,
@@ -128,6 +133,79 @@ pub struct HoverInfo {
 pub struct OpmExport {
     pub text: Option<String>,
     pub status: Option<String>,
+}
+
+/// Refinement lifecycle of one target-orbit candidate row.
+pub enum RowPlanState {
+    /// Impulsive template numbers only (not yet refined).
+    Impulsive,
+    Refining,
+    Refined(whatiforbit_sim::targeting::RefinedPlan),
+    Failed(String),
+}
+
+pub struct CandidateRow {
+    pub label: String,
+    pub dv_km_s: f64,
+    pub prop_kg: f64,
+    pub duration_s: f64,
+    pub n_burns: usize,
+    pub feasible: bool,
+    /// Why this row is infeasible (empty when feasible).
+    pub blocking: String,
+    pub plan: whatiforbit_sim::targeting::ImpulsivePlan,
+    pub state: RowPlanState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TargetModeUi {
+    Cheapest,
+    Fastest,
+}
+
+/// Target-orbit solver panel state.
+#[derive(Resource)]
+pub struct TargetSolve {
+    pub apo_alt_km: f64,
+    pub peri_alt_km: f64,
+    pub inc_deg: f64,
+    pub mode: TargetModeUi,
+    pub deadline_enabled: bool,
+    pub deadline_hours: f64,
+
+    pub rows: Vec<CandidateRow>,
+    /// Human-readable verdict/shortfall block (None until first solve).
+    pub verdict_text: Option<String>,
+    /// Closest-achievable orbit offered on shortfall: (apo alt, peri alt, inc).
+    pub closest_offer: Option<(f64, f64, f64)>,
+
+    /// In-flight refinement: (row index, refiner).
+    pub active_refine: Option<(usize, whatiforbit_sim::targeting::Refiner)>,
+    /// Apply this row to the maneuver list as soon as its refinement lands.
+    pub apply_when_done: Option<usize>,
+    /// Trajectory preview for the hovered row.
+    pub preview: Option<whatiforbit_sim::Trajectory>,
+    pub preview_row: Option<usize>,
+}
+
+impl Default for TargetSolve {
+    fn default() -> Self {
+        Self {
+            apo_alt_km: 800.0,
+            peri_alt_km: 800.0,
+            inc_deg: 51.6,
+            mode: TargetModeUi::Cheapest,
+            deadline_enabled: false,
+            deadline_hours: 24.0,
+            rows: Vec::new(),
+            verdict_text: None,
+            closest_offer: None,
+            active_refine: None,
+            apply_when_done: None,
+            preview: None,
+            preview_row: None,
+        }
+    }
 }
 
 #[derive(Resource)]

@@ -23,6 +23,7 @@ pub fn ui_system(
     output: Res<SimOutput>,
     channel: Res<FetchChannel>,
     mut opm: ResMut<OpmExport>,
+    mut solve: ResMut<TargetSolve>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -49,6 +50,8 @@ pub fn ui_system(
                 changed |= propagation_section(ui, &mut input);
                 ui.separator();
                 changed |= maneuvers_section(ui, &mut input, &output);
+                ui.separator();
+                target_orbit_section(ui, &mut input, &output, &mut solve);
                 ui.separator();
                 export_section(ui, &input, &output, &mut opm);
                 ui.separator();
@@ -95,6 +98,165 @@ pub fn ui_system(
 
     if changed {
         input.dirty = true;
+    }
+}
+
+fn target_orbit_section(
+    ui: &mut egui::Ui,
+    input: &mut ScenarioInput,
+    output: &SimOutput,
+    solve: &mut TargetSolve,
+) {
+    ui.strong("Target orbit");
+    let mut hovered_row: Option<usize> = None;
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(output.whatif.is_some(), egui::Button::new("Copy current"))
+            .clicked()
+        {
+            if let Some(s) = output
+                .whatif
+                .as_ref()
+                .and_then(|w| w.trajectory.sample_at(0.0))
+            {
+                let el = whatiforbit_sim::elements_from_rv(s.r, s.v);
+                solve.apo_alt_km = el.apoapsis_alt_km.unwrap_or(solve.apo_alt_km);
+                solve.peri_alt_km = el.periapsis_alt_km;
+                solve.inc_deg = el.inc_deg;
+            }
+        }
+    });
+    drag(ui, "Apoapsis alt", &mut solve.apo_alt_km, 10.0, " km");
+    drag(ui, "Periapsis alt", &mut solve.peri_alt_km, 10.0, " km");
+    drag(ui, "Inclination", &mut solve.inc_deg, 0.1, "°");
+
+    ui.horizontal(|ui| {
+        ui.label("Optimize:");
+        ui.selectable_value(&mut solve.mode, TargetModeUi::Cheapest, "Cheapest");
+        ui.selectable_value(&mut solve.mode, TargetModeUi::Fastest, "Fastest");
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut solve.deadline_enabled, "Deadline");
+        if solve.deadline_enabled {
+            ui.add(
+                egui::DragValue::new(&mut solve.deadline_hours)
+                    .speed(1.0)
+                    .suffix(" h"),
+            );
+        }
+    });
+
+    if ui
+        .add_enabled(input.loaded.is_some(), egui::Button::new("Solve"))
+        .clicked()
+    {
+        crate::sim::run_target_solve(input, solve);
+    }
+
+    if let Some(v) = &solve.verdict_text {
+        let color = if v.starts_with("Reachable") {
+            egui::Color32::from_rgb(120, 220, 130)
+        } else {
+            egui::Color32::from_rgb(255, 160, 60)
+        };
+        ui.colored_label(color, v);
+    }
+    if let Some((apo, peri, inc)) = solve.closest_offer {
+        if ui
+            .button(format!(
+                "Target closest achievable ({apo:.0} × {peri:.0} km, {inc:.2}°)"
+            ))
+            .clicked()
+        {
+            solve.apo_alt_km = apo;
+            solve.peri_alt_km = peri;
+            solve.inc_deg = inc;
+            crate::sim::run_target_solve(input, solve);
+        }
+    }
+
+    let mut apply_row: Option<usize> = None;
+    if !solve.rows.is_empty() {
+        egui::Grid::new("target_candidates")
+            .num_columns(6)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.small("plan");
+                ui.small("Δv m/s");
+                ui.small("prop kg");
+                ui.small("time");
+                ui.small("burns");
+                ui.small("");
+                ui.end_row();
+                for (i, row) in solve.rows.iter().enumerate() {
+                    let dim = !row.feasible;
+                    let text = |s: String| {
+                        if dim {
+                            egui::RichText::new(s).weak()
+                        } else {
+                            egui::RichText::new(s)
+                        }
+                    };
+                    let name = ui.label(text(match &row.state {
+                        RowPlanState::Refined(_) => format!("{} ✓", row.label),
+                        RowPlanState::Refining => format!("{} …", row.label),
+                        RowPlanState::Failed(_) => format!("{} ✗", row.label),
+                        RowPlanState::Impulsive => row.label.clone(),
+                    }));
+                    let hover_note = match &row.state {
+                        RowPlanState::Failed(e) => format!("refinement failed: {e}"),
+                        _ => row.blocking.clone(),
+                    };
+                    if !hover_note.is_empty() {
+                        name.clone().on_hover_text(hover_note);
+                    }
+                    if name.hovered() {
+                        hovered_row = Some(i);
+                    }
+                    ui.label(text(format!("{:.0}", row.dv_km_s * 1000.0)));
+                    ui.label(text(if input.infinite_fuel {
+                        "—".into()
+                    } else {
+                        format!("{:.1}", row.prop_kg)
+                    }));
+                    ui.label(text(fmt_hms(row.duration_s)));
+                    ui.label(text(format!("{}", row.n_burns)));
+                    if row.feasible
+                        && !matches!(
+                            row.plan.kind,
+                            whatiforbit_sim::targeting::StrategyKind::EdelbaumSpiral
+                        )
+                    {
+                        let applying = solve.apply_when_done == Some(i);
+                        let label = if applying { "applying…" } else { "Apply" };
+                        if ui.small_button(label).clicked() {
+                            apply_row = Some(i);
+                        }
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+                }
+            });
+        ui.label(
+            egui::RichText::new(
+                "Applying a plan replaces the maneuver list. Hover a row to preview.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    if let Some(i) = apply_row {
+        crate::sim::request_apply(input, solve, i);
+    }
+    match hovered_row {
+        Some(i) => crate::sim::compute_preview(input, solve, i),
+        None => {
+            solve.preview = None;
+            solve.preview_row = None;
+        }
     }
 }
 
@@ -359,13 +521,20 @@ fn maneuvers_section(
     output: &SimOutput,
 ) -> bool {
     ui.strong("Maneuvers");
+    ui.label(
+        egui::RichText::new("Maneuvers execute in order; each starts after the previous ends.")
+            .small()
+            .weak(),
+    );
     let mut c = false;
     let mut remove: Option<usize> = None;
+    let starts = crate::sim::stacked_start_times_s(&input.maneuvers);
 
     for (i, m) in input.maneuvers.iter_mut().enumerate() {
+        let abs_min = starts.get(i).copied().unwrap_or(0.0) / 60.0;
         let title = match m.kind {
-            ManeuverKind::Impulsive => format!("#{} impulse @ {:+.1} min", i + 1, m.t_offset_min),
-            ManeuverKind::FiniteBurn => format!("#{} burn @ {:+.1} min", i + 1, m.t_offset_min),
+            ManeuverKind::Impulsive => format!("#{} impulse @ +{:.1} min", i + 1, abs_min),
+            ManeuverKind::FiniteBurn => format!("#{} burn @ +{:.1} min", i + 1, abs_min),
         };
         egui::CollapsingHeader::new(title)
             .id_salt(("maneuver", i))
@@ -380,7 +549,13 @@ fn maneuvers_section(
                         .selectable_value(&mut m.kind, ManeuverKind::FiniteBurn, "Finite burn")
                         .changed();
                 });
-                c |= drag(ui, "Time from epoch", &mut m.t_offset_min, 1.0, " min");
+                let gap_label = if i == 0 {
+                    "Start (after epoch)"
+                } else {
+                    "Start (after previous)"
+                };
+                c |= drag(ui, gap_label, &mut m.t_offset_min, 1.0, " min");
+                m.t_offset_min = m.t_offset_min.max(0.0);
                 match m.kind {
                     ManeuverKind::Impulsive => {
                         ui.label("Δv (VNC), m/s:");

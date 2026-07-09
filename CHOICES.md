@@ -174,7 +174,116 @@ prevent-default globally was rejected: it would re-enable browser handling for *
 expects it on. Verified: Cmd+V keydown reaches the page un-prevented while plain keys
 remain consumed by winit.
 
-## 16. Trajectories rendered as gizmo polylines
+## 16. Target-orbit optimality: ΔV as currency, time as constraint, Pareto presentation
+
+**Question:** For the target-orbit solver, what does "optimal" mean — time, propellant,
+ΔV, or some combination?
+
+**Decision (with user):** ΔV is the internal optimization currency; propellant is its
+per-vehicle monotone image and the user-facing number/feasibility gate — they are one
+axis, not two. Time is the genuinely orthogonal axis (mostly coast/wait, not burn time).
+No weighted blends (incommensurate units, unexplainable answers). Two constrained modes —
+cheapest-with-optional-deadline and fastest-within-prop — over an always-visible Pareto
+candidate list; ties break toward fewer burns. User additionally chose **finite-burn
+optimization** over impulsive-plus-check: impulsive templates remain as seeds and lower
+bounds, but candidates are converged as finite burn arcs against the real propagator.
+Scope: target a/e/i (as apo/peri/inc); RAAN & phase deferred. See PLAN-target-orbit.md.
+
+## 17. ΔV accounting: expended, not net velocity change
+
+**Question:** During M2 testing, finite-burn realizations of a 0.888 km/s Hohmann
+reported 1.037 km/s of "ΔV" while consuming exactly the rocket-equation propellant for
+0.888. Which number is right?
+
+**Decision:** The reported metric was wrong: `SimResult::total_dv` summed `|v_after −
+v_before|` per burn, which folds in gravity's contribution to the velocity change over
+the arc (~350 m/s over a 43 s LEO burn — gravity mostly *turns* the vector). Changed to
+expended ΔV: `vₑ·ln(m_before/m_after)` for mass-depleting burns, `F·t/m` under the
+infinite-fuel cheat. Gravity *losses* still show up honestly — as more expended ΔV needed
+to hit the target — which is exactly what the optimizer should be charged for.
+
+## 18. Finite-burn optimizer: feasibility is not convergence
+
+**Question:** The first optimizer version returned the first constraint-satisfying point,
+which can be far from cheapest. When is a refinement "done"?
+
+**Decision:** Track the best *feasible* point across augmented-Lagrangian outer loops and
+stop only when the feasible cost plateaus (<0.5% improvement between outers, minimum 3
+outers), returning the best-seen rather than the last point. Also: the optimizer runs
+against the same DP5(4)+J2 propagation the display uses, targets are evaluated as mean
+elements over a post-burn revolution, and the whole thing is resumable
+(`Refiner::step(eval_budget)`) so the app amortizes it across frames on wasm.
+
+## 19. Optimizer robustness for low-thrust-chemical vehicles
+
+**Question:** A user's solve stalled at "refining best plan…" forever, and Apply did
+nothing. Reproduced natively: the default vehicle (400 N / 1000 kg) from ISS altitude to
+800 km fails refinement one residual-width from feasible (violation 1.29 after 10 outer
+loops), and the failure was silent in the UI.
+
+**Decision:** Four fixes. (1) The augmented-Lagrangian penalty weight now escalates only
+when the violation stops improving, capped at 1e5 — the previous unconditional ×8 ramp to
+1e7 turned the merit surface into a cliff Nelder–Mead couldn't walk. (2) Default element
+tolerances widened (±10 km SMA, ±2e-3 ecc) to match what constant-direction multi-minute
+burn arcs can physically null. (3) A first burn whose centered arc would start before
+t=0 is seeded one revolution later instead of being clamp-biased. (4) UX: refinement
+progress is shown (evaluation count), failure is surfaced in the verdict line, and Apply
+falls back to an honestly-labeled impulsive approximation instead of dead-ending.
+Regression test pinned at the user's exact scenario. Also cut per-evaluation cost ~3× by
+sampling optimizer propagations coarsely (every output point forces an integrator step)
+and made `Refiner::step` honor small budgets (it previously ran a full outer loop per
+call, freezing wasm frames for seconds on large orbits).
+
+## 20. Earth rotation via GMST + real solar lighting (eclipse groundwork)
+
+**Question:** The user wants Earth rotation, motivated by future sunlit/eclipse
+modeling. Decorative spin, or physically meaningful rotation?
+
+**Decision:** Meaningful: the globe's yaw is GMST (IAU 1982) at the scrubbed epoch —
+the standard TEME→Earth-fixed rotation for SGP4-class work — so longitude under the
+spacecraft is now approximately correct (UT1≈UTC accepted, ~0.004°). Alongside it,
+`sim_core::earth` gained Vallado's low-precision solar ephemeris (~0.01°), and the
+scene's directional light is aimed along the real sun vector per epoch: the day/night
+terminator on the globe is now physically correct and animates with playback. This is
+exactly the groundwork spacecraft eclipse tests need — sunlit/umbra determination is a
+line-sphere test between a trajectory sample, the sun vector, and Earth's radius.
+Validated: GMST matches the J2000 textbook value; sun passes equinox/solstice checks;
+and subsolar longitude lands on Greenwich (±equation of time) at 12:00 UTC, which ties
+the two together. The texture-longitude offset (Greenwich on mesh −X, hence yaw =
+GMST − π) is derived in a code comment and visually verified against the terminator.
+
+## 21. Infinite fuel suspends *both* vehicle gates in the solver
+
+**Question:** With infinite fuel on, the solver still blocked plans behind the
+burn-envelope gate ("burns too long for this thrust"), returning estimate-only verdicts
+for ambitious targets. Should the cheat suspend that too?
+
+**Decision:** Yes — as the plan originally specified. The envelope gate exists to flag
+where the impulsive model degrades (long burn arcs), which is a realism warning, not a
+conservation law; cheat mode is explicitly "let me try orbital ideas without real
+constraints". With infinite fuel: ΔV budget and burn-envelope checks are both skipped,
+candidates report zero propellant ("—" in the table), and refinement still runs against
+full dynamics (long arcs may converge roughly or fall back to the labeled impulsive
+approximation). The deadline gate is NOT suspended — it's a user-set constraint, not a
+vehicle limit. Pinned by test: a weak vehicle targeting GEO is VehicleLimited honestly
+and Feasible with the cheat.
+
+## 22. Maneuvers stack chronologically (relative timing, not clamps)
+
+**Question (user):** A later maneuver shouldn't be able to commence before an earlier one.
+Enforce by clamping absolute times, or restructure the timing model?
+
+**Decision:** Relative/stacked timing: each row's offset is "minutes after the previous
+maneuver ends" (first row: after epoch), clamped ≥ 0, with the computed absolute time
+shown in each row's header. Ordering is then correct *by construction* — no clamp
+fighting the user mid-edit (the earlier typing saga taught that lesson), and editing an
+early maneuver's time naturally shifts everything downstream, which matches how burn
+sequences are actually planned. This is also exactly how the finite-burn optimizer
+already parameterizes its decision vector (start + gaps), so solver plans materialize
+losslessly. sim-core's `Maneuver` keeps absolute offsets — stacking is a UI-layer
+conversion (`stacked_start_times_s`, unit-tested).
+
+## 23. Trajectories rendered as gizmo polylines
 
 **Question:** Build mesh geometry for orbit paths or use Bevy's immediate-mode gizmos?
 

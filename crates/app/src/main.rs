@@ -66,6 +66,7 @@ fn main() {
         .init_resource::<FetchChannel>()
         .init_resource::<types::TrackHover>()
         .init_resource::<types::OpmExport>()
+        .init_resource::<types::TargetSolve>()
         .add_systems(Startup, scene::setup_scene)
         .add_systems(Startup, {
             #[cfg(target_arch = "wasm32")]
@@ -93,8 +94,10 @@ fn main() {
             Update,
             (
                 sim::apply_fetch_results,
+                sim::drive_refinement,
                 sim::recompute,
                 sim::advance_playback,
+                scene::update_earth_and_sun,
                 scene::update_markers,
                 scene::draw_trajectories,
                 scene::orbit_camera,

@@ -138,5 +138,8 @@ Key choices and why:
 ## Post-MVP ideas (parking lot)
 
 Space-Track login via proxy · drag/SRP/third-body dynamics · ground tracks · multiple
-spacecraft & conjunction screening · maneuver targeting (change apogee to X) · scenario
-save/share via URL · Lambert solver for rendezvous · ephemeris export (CCSDS OEM).
+spacecraft & conjunction screening · scenario save/share via URL · Lambert solver for
+rendezvous · ephemeris export (CCSDS OEM).
+
+Maneuver targeting has been promoted to a planned feature: see
+[PLAN-target-orbit.md](PLAN-target-orbit.md).

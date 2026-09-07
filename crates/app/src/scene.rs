@@ -20,6 +20,68 @@ pub fn to_render(v: glam::DVec3) -> Vec3 {
     )
 }
 
+/// The view's frame transform, resolved from the scenario epoch.
+///
+/// Inertial mode is the identity. Earth-fixed rotates every point by the GMST
+/// at *its own* time — a whole-track rotation would just spin the picture; it
+/// is the per-sample angle that draws the westward corkscrew. Interpolation
+/// therefore has to happen in the inertial frame and be transformed here, at
+/// draw time, or the curve cuts corners across the rotation.
+#[derive(Clone, Copy)]
+pub struct FrameXform {
+    frame: ViewFrame,
+    /// Epoch of t_s = 0, shared by every trajectory in the scenario.
+    epoch0: Option<hifitime::Epoch>,
+}
+
+impl FrameXform {
+    pub fn new(frame: ViewFrame, output: &SimOutput, input: &ScenarioInput) -> Self {
+        let epoch0 = output
+            .whatif
+            .as_ref()
+            .and_then(|w| w.trajectory.epoch)
+            .or_else(|| output.baseline.as_ref().and_then(|b| b.trajectory.epoch))
+            .or_else(|| input.loaded.as_ref().map(|l| l.state.epoch));
+        Self { frame, epoch0 }
+    }
+
+    /// Rotation angle at `t_s`; zero in the inertial view, and zero with no
+    /// epoch to hang it on (nothing is drawn in that case anyway).
+    pub fn gmst(&self, t_s: f64) -> f64 {
+        match (self.frame, self.epoch0) {
+            (ViewFrame::EarthFixed, Some(e)) => {
+                whatiforbit_sim::earth::gmst_rad(e + hifitime::Duration::from_seconds(t_s))
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// A physics vector at `t_s`, rotated into the view frame (still km).
+    pub fn apply(&self, t_s: f64, v: glam::DVec3) -> glam::DVec3 {
+        match self.frame {
+            ViewFrame::Inertial => v,
+            ViewFrame::EarthFixed => whatiforbit_sim::earth::eci_to_ecef(v, self.gmst(t_s)),
+        }
+    }
+
+    /// A physics position at `t_s`, in render space. The one call every
+    /// drawing and picking site must go through.
+    pub fn r(&self, t_s: f64, r: glam::DVec3) -> Vec3 {
+        to_render(self.apply(t_s, r))
+    }
+
+    /// Velocity in the view frame, including the transport term when
+    /// Earth-fixed. Speed is frame-dependent; altitude is not.
+    pub fn vel(&self, t_s: f64, r: glam::DVec3, v: glam::DVec3) -> glam::DVec3 {
+        match self.frame {
+            ViewFrame::Inertial => v,
+            ViewFrame::EarthFixed => {
+                whatiforbit_sim::earth::eci_to_ecef_vel(r, v, self.gmst(t_s))
+            }
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct EarthGlobe;
 
@@ -147,22 +209,36 @@ fn display_epoch(
 /// Rotate the globe to GMST and aim the sunlight along the real solar
 /// direction for the epoch being displayed. This is what makes the day/night
 /// terminator and (future) eclipse geometry meaningful.
+///
+/// In the Earth-fixed view the globe instead holds still at yaw 0, which puts
+/// Greenwich on physics +X — exactly where `eci_to_ecef` sends the GMST
+/// meridian. The two views therefore agree on where the spacecraft is over the
+/// ground at the scrubbed instant; they differ only in what the track does
+/// away from it. The sun has to take the same rotation, or the terminator
+/// lands on the wrong meridian.
 #[allow(clippy::type_complexity)]
 pub fn update_earth_and_sun(
     output: Res<SimOutput>,
     input: Res<ScenarioInput>,
     playback: Res<Playback>,
+    frame: Res<ViewFrame>,
     mut globe: Query<&mut Transform, (With<EarthGlobe>, Without<SunLight>)>,
     mut sun: Query<&mut Transform, (With<SunLight>, Without<EarthGlobe>)>,
 ) {
     let Some(epoch) = display_epoch(&output, &input, &playback) else {
         return;
     };
+    let gmst = whatiforbit_sim::earth::gmst_rad(epoch);
     if let Ok(mut tf) = globe.single_mut() {
-        tf.rotation = earth_rotation(whatiforbit_sim::earth::gmst_rad(epoch));
+        tf.rotation = earth_rotation(if frame.is_earth_fixed() { 0.0 } else { gmst });
     }
     if let Ok(mut tf) = sun.single_mut() {
         let s = whatiforbit_sim::earth::sun_direction(epoch);
+        let s = if frame.is_earth_fixed() {
+            whatiforbit_sim::earth::eci_to_ecef(s, gmst)
+        } else {
+            s
+        };
         // Light travels from the sun toward Earth: along -s.
         let dir = -Vec3::new(s.x as f32, s.z as f32, -s.y as f32);
         *tf = Transform::default().looking_to(dir, Vec3::Y);
@@ -177,14 +253,17 @@ pub fn draw_trajectories(
     input: Res<ScenarioInput>,
     hover: Res<TrackHover>,
     solve: Res<TargetSolve>,
+    frame: Res<ViewFrame>,
 ) {
+    let xf = FrameXform::new(*frame, &output, &input);
+
     // Candidate preview (hovered row in the target-orbit table): dashed cyan.
     if let Some(preview) = &solve.preview {
         for pair in preview.samples.chunks(2) {
             if let [a, b] = pair {
                 gizmos.line(
-                    to_render(a.r),
-                    to_render(b.r),
+                    xf.r(a.t_s, a.r),
+                    xf.r(b.t_s, b.r),
                     Color::srgba(0.3, 0.9, 1.0, 0.8),
                 );
             }
@@ -192,12 +271,13 @@ pub fn draw_trajectories(
     }
     if let Some(h) = &hover.0 {
         gizmos.sphere(
-            Isometry3d::from_translation(to_render(h.r_km)),
+            Isometry3d::from_translation(xf.r(h.t_s, h.r_km)),
             0.14,
             Color::WHITE,
         );
     }
-    // Polar axis for orientation.
+    // Polar axis for orientation. Invariant under the frame rotation, which
+    // is about this very axis, so it needs no transform.
     let pole = to_render(glam::DVec3::new(0.0, 0.0, R_EARTH + 1500.0));
     gizmos.line(-pole, pole, Color::srgba(0.6, 0.6, 0.9, 0.4));
 
@@ -206,7 +286,7 @@ pub fn draw_trajectories(
             .trajectory
             .samples
             .iter()
-            .map(|s| to_render(s.r))
+            .map(|s| xf.r(s.t_s, s.r))
             .collect();
         gizmos.linestrip(pts, Color::srgba(0.55, 0.6, 0.7, 0.7));
     }
@@ -215,7 +295,7 @@ pub fn draw_trajectories(
             .trajectory
             .samples
             .iter()
-            .map(|s| to_render(s.r))
+            .map(|s| xf.r(s.t_s, s.r))
             .collect();
         gizmos.linestrip(pts, Color::srgb(1.0, 0.6, 0.1));
 
@@ -227,7 +307,7 @@ pub fn draw_trajectories(
                     ManeuverKind::Impulsive => Color::srgb(0.3, 1.0, 0.4),
                     ManeuverKind::FiniteBurn => Color::srgb(1.0, 0.3, 0.4),
                 };
-                gizmos.sphere(Isometry3d::from_translation(to_render(s.r)), 0.18, color);
+                gizmos.sphere(Isometry3d::from_translation(xf.r(s.t_s, s.r)), 0.18, color);
             }
         }
     }
@@ -236,10 +316,13 @@ pub fn draw_trajectories(
 #[allow(clippy::type_complexity)]
 pub fn update_markers(
     output: Res<SimOutput>,
+    input: Res<ScenarioInput>,
     playback: Res<Playback>,
+    frame: Res<ViewFrame>,
     mut whatif_q: Query<(&mut Transform, &mut Visibility), (With<WhatIfMarker>, Without<BaselineMarker>)>,
     mut baseline_q: Query<(&mut Transform, &mut Visibility), (With<BaselineMarker>, Without<WhatIfMarker>)>,
 ) {
+    let xf = FrameXform::new(*frame, &output, &input);
     if let Ok((mut tf, mut vis)) = whatif_q.single_mut() {
         match output
             .whatif
@@ -247,7 +330,7 @@ pub fn update_markers(
             .and_then(|w| w.trajectory.sample_at(playback.t_s))
         {
             Some(s) => {
-                tf.translation = to_render(s.r);
+                tf.translation = xf.r(s.t_s, s.r);
                 *vis = Visibility::Visible;
             }
             None => *vis = Visibility::Hidden,
@@ -260,7 +343,7 @@ pub fn update_markers(
             .and_then(|w| w.trajectory.sample_at(playback.t_s))
         {
             Some(s) => {
-                tf.translation = to_render(s.r);
+                tf.translation = xf.r(s.t_s, s.r);
                 *vis = Visibility::Visible;
             }
             None => *vis = Visibility::Hidden,
@@ -311,4 +394,62 @@ pub fn orbit_camera(
         cam.dist * cam.pitch.cos() * cam.yaw.cos(),
     );
     *tf = Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Y);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use whatiforbit_sim::earth::eci_to_ecef;
+
+    /// The two views must agree on where the spacecraft is *over the ground*
+    /// at a given instant: rotating the globe by GMST and drawing the
+    /// inertial position has to place the point on the same patch of Earth as
+    /// holding the globe still and drawing the Earth-fixed position. This
+    /// pins down the sign conventions shared by `to_render`, `earth_rotation`
+    /// and `eci_to_ecef` — get any one of them backwards and the marker jumps
+    /// when the view frame is toggled.
+    #[test]
+    fn both_frames_agree_on_the_ground_point() {
+        let r = glam::DVec3::new(4_100.0, -3_900.0, 4_500.0);
+        for gmst in [0.0, 0.7, 2.9, 4.5, 6.0] {
+            let inertial = earth_rotation(gmst).inverse() * to_render(r);
+            let earth_fixed = earth_rotation(0.0).inverse() * to_render(eci_to_ecef(r, gmst));
+            assert!(
+                inertial.distance(earth_fixed) < 1e-4,
+                "GMST {gmst}: {inertial:?} vs {earth_fixed:?}",
+            );
+        }
+    }
+
+    /// The Earth-fixed view is a rotation about the pole, so it moves neither
+    /// altitude nor the polar axis the orientation gizmo is drawn along.
+    #[test]
+    fn earth_fixed_view_preserves_altitude_and_pole() {
+        let xf = FrameXform {
+            frame: ViewFrame::EarthFixed,
+            epoch0: Some(hifitime::Epoch::from_gregorian_utc_hms(2026, 1, 1, 0, 0, 0)),
+        };
+        let r = glam::DVec3::new(4_100.0, -3_900.0, 4_500.0);
+        for t_s in [0.0, 600.0, 43_200.0] {
+            assert!((xf.apply(t_s, r).length() - r.length()).abs() < 1e-9);
+            let pole = glam::DVec3::new(0.0, 0.0, 7_000.0);
+            assert!((xf.apply(t_s, pole) - pole).length() < 1e-9);
+        }
+    }
+
+    /// The inertial view is the identity, and stays so as time advances.
+    #[test]
+    fn inertial_view_is_the_identity() {
+        let xf = FrameXform {
+            frame: ViewFrame::Inertial,
+            epoch0: Some(hifitime::Epoch::from_gregorian_utc_hms(2026, 1, 1, 0, 0, 0)),
+        };
+        let (r, v) = (
+            glam::DVec3::new(4_100.0, -3_900.0, 4_500.0),
+            glam::DVec3::new(-5.0, 4.0, 2.0),
+        );
+        assert_eq!(xf.apply(9_000.0, r), r);
+        assert_eq!(xf.vel(9_000.0, r, v), v);
+        assert_eq!(xf.gmst(9_000.0), 0.0);
+    }
 }

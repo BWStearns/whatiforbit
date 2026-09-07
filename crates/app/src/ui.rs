@@ -16,6 +16,7 @@ pub fn fmt_hms(t_s: f64) -> String {
     format!("{sign}{h:02.0}:{m:02.0}:{s:02.0}")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn ui_system(
     mut contexts: EguiContexts,
     mut input: ResMut<ScenarioInput>,
@@ -24,6 +25,8 @@ pub fn ui_system(
     channel: Res<FetchChannel>,
     mut opm: ResMut<OpmExport>,
     mut solve: ResMut<TargetSolve>,
+    mut frame: ResMut<ViewFrame>,
+    mut link: ResMut<crate::share::ShareLink>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -49,13 +52,15 @@ pub fn ui_system(
                 ui.separator();
                 changed |= propagation_section(ui, &mut input);
                 ui.separator();
+                view_section(ui, &mut frame);
+                ui.separator();
                 changed |= maneuvers_section(ui, &mut input, &output);
                 ui.separator();
                 target_orbit_section(ui, &mut input, &output, &mut solve);
                 ui.separator();
-                export_section(ui, &input, &output, &mut opm);
+                export_section(ui, &input, &output, &mut opm, &mut link);
                 ui.separator();
-                readout_section(ui, &input, &output, &playback);
+                readout_section(ui, &input, &output, &playback, *frame);
             });
         });
 
@@ -265,7 +270,32 @@ fn export_section(
     input: &ScenarioInput,
     output: &SimOutput,
     opm: &mut OpmExport,
+    link: &mut crate::share::ShareLink,
 ) {
+    ui.strong("Share");
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!link.url.is_empty(), egui::Button::new("Copy link"))
+            .on_hover_text(
+                "Every setting here — spacecraft, vehicle, maneuvers, view frame, \
+                 camera and scrub time — rides in the link.",
+            )
+            .clicked()
+        {
+            ui.ctx().copy_text(link.url.clone());
+            link.status = Some("Copied.".into());
+        }
+        if let Some(status) = &link.status {
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+    });
+    ui.label(
+        egui::RichText::new("The address bar tracks the current view; it holds while playing.")
+            .small()
+            .weak(),
+    );
+
+    ui.add_space(6.0);
     ui.strong("Export");
     let ready = output.scenario.is_some() && output.whatif.is_some() && input.loaded.is_some();
     let btn = ui.add_enabled(ready, egui::Button::new("Generate OPM (CCSDS)"));
@@ -299,6 +329,7 @@ pub fn track_hover_system(
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     output: Res<SimOutput>,
     input: Res<ScenarioInput>,
+    frame: Res<ViewFrame>,
     mut hover: ResMut<TrackHover>,
 ) {
     const PICK_RADIUS_PX: f32 = 14.0;
@@ -316,6 +347,9 @@ pub fn track_hover_system(
         return;
     };
 
+    // Picking has to use the same transform the track was drawn with, or the
+    // tooltip attaches to a point that is no longer under the cursor.
+    let xf = crate::scene::FrameXform::new(*frame, &output, &input);
     let mut best: Option<(f32, HoverInfo)> = None;
     let tracks = [
         ("What-if", output.whatif.as_ref()),
@@ -324,7 +358,7 @@ pub fn track_hover_system(
     for (label, result) in tracks {
         let Some(result) = result else { continue };
         for s in &result.trajectory.samples {
-            let Ok(pos) = camera.world_to_viewport(cam_tf, crate::scene::to_render(s.r)) else {
+            let Ok(pos) = camera.world_to_viewport(cam_tf, xf.r(s.t_s, s.r)) else {
                 continue;
             };
             let d = pos.distance(cursor);
@@ -335,7 +369,7 @@ pub fn track_hover_system(
                         track: label,
                         t_s: s.t_s,
                         r_km: s.r,
-                        speed_km_s: s.v.length(),
+                        speed_km_s: xf.vel(s.t_s, s.r, s.v).length(),
                         mass_kg: s.mass,
                     },
                 ));
@@ -361,8 +395,9 @@ pub fn track_hover_system(
                 ui.label(format!("{epoch}"));
             }
             ui.label(format!(
-                "Alt {:.1} km   |v| {:.4} km/s",
+                "Alt {:.1} km   {} {:.4} km/s",
                 info.r_km.length() - whatiforbit_sim::R_EARTH,
+                if frame.is_earth_fixed() { "ground" } else { "|v|" },
                 info.speed_km_s
             ));
             if !input.infinite_fuel && info.track == "What-if" {
@@ -515,6 +550,28 @@ fn propagation_section(ui: &mut egui::Ui, input: &mut ScenarioInput) -> bool {
     c
 }
 
+/// Reference frame for the 3D view. Purely a display choice — it changes no
+/// physics and triggers no recompute, so it deliberately does not set `dirty`.
+fn view_section(ui: &mut egui::Ui, frame: &mut ViewFrame) {
+    ui.strong("View frame");
+    ui.horizontal(|ui| {
+        ui.selectable_value(frame, ViewFrame::Inertial, "Inertial")
+            .on_hover_text("TEME-at-epoch: the orbit holds still, the globe turns beneath it.");
+        ui.selectable_value(frame, ViewFrame::EarthFixed, "Earth-fixed")
+            .on_hover_text(
+                "Rotating with the Earth: the globe holds still and the track \
+                 corkscrews west, showing which ground it actually passes over.",
+            );
+    });
+    if frame.is_earth_fixed() {
+        ui.label(
+            egui::RichText::new("Track drawn in the rotating frame; orbital elements stay inertial.")
+                .small()
+                .weak(),
+        );
+    }
+}
+
 fn maneuvers_section(
     ui: &mut egui::Ui,
     input: &mut ScenarioInput,
@@ -625,6 +682,7 @@ fn readout_section(
     input: &ScenarioInput,
     output: &SimOutput,
     playback: &Playback,
+    frame: ViewFrame,
 ) {
     ui.strong("State readout (what-if)");
     let Some(whatif) = &output.whatif else {
@@ -637,14 +695,19 @@ fn readout_section(
     if let Some(epoch) = whatif.trajectory.epoch_at(s.t_s) {
         ui.label(format!("UTC: {epoch}"));
     }
+    // Elements and altitude come from the inertial state regardless of the
+    // view frame: elements are only meaningful there, and altitude is
+    // invariant under a rotation about the pole. Speed is not.
     let el = elements_from_rv(s.r, s.v);
     let alt = s.r.length() - R_EARTH;
+    let xf = crate::scene::FrameXform::new(frame, output, input);
+    let speed = xf.vel(s.t_s, s.r, s.v).length();
     egui::Grid::new("elements").num_columns(2).show(ui, |ui| {
         ui.label("Altitude");
         ui.label(format!("{alt:.1} km"));
         ui.end_row();
-        ui.label("Speed");
-        ui.label(format!("{:.4} km/s", s.v.length()));
+        ui.label(frame.speed_label());
+        ui.label(format!("{speed:.4} km/s"));
         ui.end_row();
         ui.label("SMA");
         ui.label(format!("{:.1} km", el.sma_km));

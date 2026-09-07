@@ -39,6 +39,6 @@ optionally battery/power what-ifs on top.
 ## Other parked items
 
 See the parking lot in [PLAN.md](PLAN.md): Space-Track proxy, drag/SRP/third-body,
-ground tracks (Earth rotation is now modeled via GMST, so ground tracks are mostly a
+ground tracks (the Earth-fixed view added `eci_to_ecef`, so a ground track is now a
 lat/lon projection + polyline away), conjunctions, scenario save/share, OEM export,
 WASM bundle size pass.

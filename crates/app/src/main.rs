@@ -67,6 +67,7 @@ fn main() {
         .init_resource::<types::TrackHover>()
         .init_resource::<types::OpmExport>()
         .init_resource::<types::TargetSolve>()
+        .init_resource::<types::ViewFrame>()
         .add_systems(Startup, scene::setup_scene)
         .add_systems(Startup, {
             #[cfg(target_arch = "wasm32")]

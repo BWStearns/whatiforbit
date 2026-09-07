@@ -5,7 +5,9 @@
 //! pole — the standard recipe for SGP4-class work. `sun_direction` is
 //! Vallado's low-precision solar ephemeris (~0.01° in ecliptic longitude),
 //! plenty for lighting, terminator rendering, and umbra/penumbra eclipse
-//! tests. UT1 ≈ UTC (< 0.9 s) is accepted throughout — ~0.004° of rotation.
+//! tests. `eci_to_ecef` applies that same GMST rotation to a state vector,
+//! which is what the Earth-fixed view of a trajectory is made of.
+//! UT1 ≈ UTC (< 0.9 s) is accepted throughout — ~0.004° of rotation.
 
 use glam::DVec3;
 use hifitime::Epoch;
@@ -25,6 +27,33 @@ pub fn gmst_rad(epoch: Epoch) -> f64 {
         + 0.093_104 * t * t
         - 6.2e-6 * t * t * t;
     (gmst_s.rem_euclid(86_400.0) / 86_400.0 * TAU).rem_euclid(TAU)
+}
+
+/// Earth's rotation rate, rad/s (IAU 1976 mean sidereal rate).
+pub const OMEGA_EARTH: f64 = 7.292_115e-5;
+
+/// Rotate an inertial (TEME) vector onto the Earth-fixed frame: R_z(-GMST).
+///
+/// Strictly this lands in PEF, not ITRF — the polar-motion step is omitted, as
+/// it is a few tens of metres at the pole and invisible here. Longitude 0
+/// (Greenwich) sits on +X of the result by construction.
+pub fn eci_to_ecef(v: DVec3, gmst: f64) -> DVec3 {
+    let (s, c) = gmst.sin_cos();
+    DVec3::new(c * v.x + s * v.y, c * v.y - s * v.x, v.z)
+}
+
+/// Inverse of [`eci_to_ecef`]: R_z(+GMST).
+pub fn ecef_to_eci(v: DVec3, gmst: f64) -> DVec3 {
+    let (s, c) = gmst.sin_cos();
+    DVec3::new(c * v.x - s * v.y, c * v.y + s * v.x, v.z)
+}
+
+/// Earth-fixed velocity of an inertial state: the frame rotation plus the
+/// transport term `-omega x r`, which is what makes a geostationary satellite
+/// read as motionless rather than 3.07 km/s.
+pub fn eci_to_ecef_vel(r: DVec3, v: DVec3, gmst: f64) -> DVec3 {
+    let omega = DVec3::new(0.0, 0.0, OMEGA_EARTH);
+    eci_to_ecef(v - omega.cross(r), gmst)
 }
 
 /// Unit vector from Earth's center to the Sun in the TEME/mean-equator frame.
@@ -77,6 +106,47 @@ mod tests {
         let s = sun_direction(epoch);
         let dec_deg = s.z.asin().to_degrees();
         assert!((dec_deg - 23.44).abs() < 0.1, "declination {dec_deg} deg");
+    }
+
+    /// The GMST rotation puts the Greenwich meridian on +X: an inertial
+    /// vector at right ascension = GMST is Earth-fixed longitude 0.
+    #[test]
+    fn greenwich_lands_on_plus_x() {
+        let gmst = 1.234_f64;
+        let r_eci = DVec3::new(gmst.cos(), gmst.sin(), 0.0) * 6_378.0;
+        let r_ecef = eci_to_ecef(r_eci, gmst);
+        assert!(r_ecef.y.abs() < 1e-9, "{r_ecef:?} should be on +X");
+        assert!((r_ecef.x - 6_378.0).abs() < 1e-9, "{r_ecef:?}");
+    }
+
+    /// Rotating about the pole preserves radius, and the inverse round-trips.
+    #[test]
+    fn rotation_preserves_radius_and_inverts() {
+        let r = DVec3::new(1_234.0, -5_678.0, 3_456.0);
+        let gmst = 2.5_f64;
+        let back = ecef_to_eci(eci_to_ecef(r, gmst), gmst);
+        assert!((eci_to_ecef(r, gmst).length() - r.length()).abs() < 1e-9);
+        assert!((back - r).length() < 1e-9, "{back:?} vs {r:?}");
+    }
+
+    /// A geostationary satellite is motionless in the Earth-fixed frame:
+    /// the transport term cancels its 3.07 km/s inertial speed, and its
+    /// position does not move as the frame rotates with it.
+    #[test]
+    fn geostationary_is_stationary_in_ecef() {
+        let a = 42_164.0;
+        let n = (crate::MU_EARTH / (a * a * a)).sqrt();
+        let r0 = DVec3::new(a, 0.0, 0.0);
+        let v0 = DVec3::new(0.0, n * a, 0.0);
+        let speed = eci_to_ecef_vel(r0, v0, 0.0).length();
+        assert!(speed < 2.0e-3, "earth-fixed speed {speed} km/s");
+
+        // A quarter day later the satellite and the frame have both turned.
+        let dt = 21_600.0;
+        let theta = n * dt;
+        let r1 = DVec3::new(a * theta.cos(), a * theta.sin(), 0.0);
+        let moved = (eci_to_ecef(r1, OMEGA_EARTH * dt) - r0).length();
+        assert!(moved < 2.0, "drifted {moved} km in 6 h");
     }
 
     /// Self-consistency: at 12:00 UTC the subsolar longitude (Sun RA − GMST)

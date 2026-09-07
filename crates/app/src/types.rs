@@ -123,7 +123,9 @@ pub struct TrackHover(pub Option<HoverInfo>);
 pub struct HoverInfo {
     pub track: &'static str,
     pub t_s: f64,
+    /// Inertial position; the view frame is applied at draw/pick time.
     pub r_km: glam::DVec3,
+    /// Speed in the *current view frame* — Earth-relative when the view is.
     pub speed_km_s: f64,
     pub mass_kg: f64,
 }
@@ -204,6 +206,32 @@ impl Default for TargetSolve {
             apply_when_done: None,
             preview: None,
             preview_row: None,
+        }
+    }
+}
+
+/// Reference frame the 3D view draws in. Physics is always inertial; this
+/// only selects a rotation applied on the way to the screen.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ViewFrame {
+    /// TEME-at-epoch: the orbit plane holds still and the globe turns under it.
+    #[default]
+    Inertial,
+    /// Earth-fixed (PEF): the globe holds still and the track corkscrews west.
+    EarthFixed,
+}
+
+impl ViewFrame {
+    pub fn is_earth_fixed(self) -> bool {
+        self == ViewFrame::EarthFixed
+    }
+
+    /// Suffix for velocity readouts, which are frame-dependent (unlike
+    /// altitude and the orbital elements).
+    pub fn speed_label(self) -> &'static str {
+        match self {
+            ViewFrame::Inertial => "Speed",
+            ViewFrame::EarthFixed => "Ground speed",
         }
     }
 }

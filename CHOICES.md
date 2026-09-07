@@ -290,3 +290,34 @@ conversion (`stacked_start_times_s`, unit-tested).
 **Decision:** Gizmos. ~2500 points per trajectory re-submitted per frame is well within
 budget, needs zero mesh management when the scenario changes, and WebGL2 handles it fine.
 Revisit only if we render many spacecraft at once.
+
+## 24. ECEF is a view transform, not a second physics frame
+
+**Question:** Users want to see the track in the rotating (Earth-fixed) frame. Do we
+propagate in ECEF, store a second set of samples, or transform at draw time?
+
+**Decision:** Draw-time transform only. Physics stays inertial everywhere — `sim-core`
+is untouched apart from gaining `eci_to_ecef` next to `gmst_rad` — and the app applies
+R_z(−GMST) per sample on the way to the screen, keyed on each sample's own time. Three
+consequences worth naming:
+
+- It has to be *per sample*, not one rotation for the whole track. A single angle just
+  spins the picture; it's the varying angle that draws the westward corkscrew.
+- Interpolation must stay inertial and be transformed afterwards (`sample_at` then
+  `FrameXform::r`), or the curve cuts corners across the rotation. This also rules out
+  caching ECEF samples on the `Trajectory`.
+- Picking must use the same transform as drawing, or the hover tooltip latches onto a
+  point that isn't under the cursor.
+
+Fidelity: this lands in PEF, not ITRF — polar motion (tens of metres) is skipped, in
+keeping with the UT1≈UTC simplification already accepted in `earth`. Speed becomes
+frame-dependent, so the readout adds the `−ω × r` transport term and relabels to "ground
+speed"; altitude and the orbital elements are left inertial, the former because a
+rotation about the pole doesn't change `|r|` and the latter because elements are only
+meaningful there. OPM export is deliberately unaffected: it stays TEME.
+
+Validated by the invariant that actually pins the sign conventions together — rotating
+the globe by GMST and drawing the inertial position must put the spacecraft over the
+same ground as holding the globe still and drawing the Earth-fixed position, so the
+marker doesn't jump when the toggle is flipped. Plus a geostationary satellite reading
+~0 km/s and holding station in ECEF.

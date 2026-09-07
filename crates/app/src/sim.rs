@@ -9,13 +9,65 @@ use whatiforbit_sim::targeting::{
 };
 use whatiforbit_sim::{parse_tle, Cheats, Maneuver, Scenario, Vehicle, R_EARTH};
 
-/// On the web, `?demo` in the URL auto-loads the ISS sample so the app can be
-/// demoed (and smoke-tested) without any clicking.
-#[cfg(target_arch = "wasm32")]
-pub fn autoload_from_url(mut input: ResMut<ScenarioInput>, mut solve: ResMut<TargetSolve>) {
-    let Some(search) = web_sys::window().and_then(|w| w.location().search().ok()) else {
+/// The query string this run was launched with: `location.search` on the web,
+/// and the first CLI argument natively, so a share link can be opened in the
+/// dev build without a browser.
+fn launch_query() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window().and_then(|w| w.location().search().ok())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::args().nth(1)
+    }
+}
+
+/// Restore app state from the launch query at startup.
+///
+/// Two shapes are accepted. A share link (`?v=1&...`, written by
+/// `share::sync_share_link`) carries the whole scenario and wins outright. The
+/// older `?demo` flags stay for browser verification and tooling: they load the
+/// ISS sample, optionally add a burn, and optionally run a canned solve.
+pub fn autoload_from_url(
+    mut input: ResMut<ScenarioInput>,
+    mut solve: ResMut<TargetSolve>,
+    mut playback: ResMut<Playback>,
+    mut frame: ResMut<ViewFrame>,
+    mut camera: Query<&mut crate::scene::OrbitCamera>,
+) {
+    let Some(search) = launch_query() else {
         return;
     };
+
+    if let Ok(mut cam) = camera.single_mut() {
+        if crate::share::apply_query(
+            &search,
+            &mut input,
+            &mut playback,
+            &mut frame,
+            &mut cam,
+            &mut solve,
+        ) {
+            if !input.tle_text.trim().is_empty() {
+                // Overwrites `dirty`/`loaded` on its own; the scrub time set
+                // from the link survives, since `recompute` only clamps it.
+                load_tle_into(&mut input);
+            }
+            // A link that silently fails to apply is near-impossible to
+            // diagnose from the outside; say what came back.
+            info!(
+                "restored share link: {} maneuver(s), {}",
+                input.maneuvers.len(),
+                match &input.loaded {
+                    Some(l) => l.name.as_str(),
+                    None => "no spacecraft",
+                }
+            );
+            return;
+        }
+    }
+
     if search.contains("demo") {
         input.tle_text = SAMPLE_TLE.to_string();
         load_tle_into(&mut input);

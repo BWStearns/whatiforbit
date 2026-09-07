@@ -1,4 +1,5 @@
 mod scene;
+mod share;
 mod sim;
 mod types;
 mod ui;
@@ -68,17 +69,12 @@ fn main() {
         .init_resource::<types::OpmExport>()
         .init_resource::<types::TargetSolve>()
         .init_resource::<types::ViewFrame>()
+        .init_resource::<share::ShareLink>()
         .add_systems(Startup, scene::setup_scene)
-        .add_systems(Startup, {
-            #[cfg(target_arch = "wasm32")]
-            {
-                sim::autoload_from_url
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                || {}
-            }
-        })
+        // PostStartup, not Startup: `autoload_from_url` restores the camera
+        // from a share link, and `setup_scene` only spawns it via Commands,
+        // which are not applied until the Startup schedule ends.
+        .add_systems(PostStartup, sim::autoload_from_url)
         .add_systems(
             PreUpdate,
             unstick_egui_modifiers
@@ -102,6 +98,7 @@ fn main() {
                 scene::update_markers,
                 scene::draw_trajectories,
                 scene::orbit_camera,
+                share::sync_share_link,
             )
                 .chain(),
         )

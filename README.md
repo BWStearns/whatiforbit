@@ -30,6 +30,13 @@ Handy demo links once the server is up: [`/?demo`](http://127.0.0.1:8080/?demo) 
 the ISS sample; [`/?demo&burn`](http://127.0.0.1:8080/?demo&burn) also adds a 60 m/s
 prograde impulse so the what-if trajectory visibly diverges from the baseline.
 
+The native build accepts a share link as its first argument, which is the quickest way to
+reproduce someone's view without a browser:
+
+```sh
+cargo run -p whatiforbit-app -- '?v=1&tle=...&frame=ecef&cam=1.25,-0.5,42.5'
+```
+
 Tests (the physics validation suite — conservation laws, analytic J2 rates, Hohmann
 transfer against the rocket equation):
 
@@ -48,8 +55,17 @@ cargo test -p whatiforbit-sim
    much propellant it used; propellant-limited burns are flagged.
 4. **Scrub time** — play/pause and drag the timeline; the readout panel shows live orbital
    elements, altitude, mass, and remaining propellant. Gray = original orbit,
-   orange = what-if.
-5. **Target an orbit** — set apoapsis/periapsis altitude and inclination, pick "cheapest"
+   orange = what-if. Switch the view frame between inertial (the orbit holds still, the
+   globe turns under it) and Earth-fixed (the globe holds still and the track corkscrews
+   west over the ground it passes over).
+5. **Share the view** — every setting lives in the URL: spacecraft, vehicle, maneuvers,
+   cheats, span, view frame, camera angle, scrub time, and the target-orbit inputs. The
+   address bar tracks whatever you are looking at (it holds still while playback runs, and
+   catches up when you pause), so sending someone the link shows them exactly your view.
+   "Copy link" under Share does the same without visiting the address bar. The spacecraft
+   travels as its TLE rather than a catalog number, so a link keeps meaning the same orbit
+   after CelesTrak updates.
+6. **Target an orbit** — set apoapsis/periapsis altitude and inclination, pick "cheapest"
    or "fastest", and Solve. The candidate table shows every strategy with its Δv,
    propellant, duration, and burn count (hover a row to preview it in cyan); the best plan
    is refined into finite burns against full dynamics, and Apply materializes it into the

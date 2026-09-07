@@ -26,6 +26,7 @@ pub fn ui_system(
     mut opm: ResMut<OpmExport>,
     mut solve: ResMut<TargetSolve>,
     mut frame: ResMut<ViewFrame>,
+    mut link: ResMut<crate::share::ShareLink>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -57,7 +58,7 @@ pub fn ui_system(
                 ui.separator();
                 target_orbit_section(ui, &mut input, &output, &mut solve);
                 ui.separator();
-                export_section(ui, &input, &output, &mut opm);
+                export_section(ui, &input, &output, &mut opm, &mut link);
                 ui.separator();
                 readout_section(ui, &input, &output, &playback, *frame);
             });
@@ -269,7 +270,32 @@ fn export_section(
     input: &ScenarioInput,
     output: &SimOutput,
     opm: &mut OpmExport,
+    link: &mut crate::share::ShareLink,
 ) {
+    ui.strong("Share");
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!link.url.is_empty(), egui::Button::new("Copy link"))
+            .on_hover_text(
+                "Every setting here — spacecraft, vehicle, maneuvers, view frame, \
+                 camera and scrub time — rides in the link.",
+            )
+            .clicked()
+        {
+            ui.ctx().copy_text(link.url.clone());
+            link.status = Some("Copied.".into());
+        }
+        if let Some(status) = &link.status {
+            ui.label(egui::RichText::new(status).small().weak());
+        }
+    });
+    ui.label(
+        egui::RichText::new("The address bar tracks the current view; it holds while playing.")
+            .small()
+            .weak(),
+    );
+
+    ui.add_space(6.0);
     ui.strong("Export");
     let ready = output.scenario.is_some() && output.whatif.is_some() && input.loaded.is_some();
     let btn = ui.add_enabled(ready, egui::Button::new("Generate OPM (CCSDS)"));

@@ -321,3 +321,37 @@ the globe by GMST and drawing the inertial position must put the spacecraft over
 same ground as holding the globe still and drawing the Earth-fixed position, so the
 marker doesn't jump when the toggle is flipped. Plus a geostationary satellite reading
 ~0 km/s and holding station in ECEF.
+
+## 25. Share links: readable query params, TLE embedded, throttled address bar
+
+**Question:** Every user setting should ride in the URL so a link reproduces the sender's
+view. What encoding, and what exactly counts as "the view"?
+
+**Decision:** Named `key=value` pairs (`?v=1&tle=…&fwd=2&frame=ecef&cam=…`) rather than
+one opaque base64 blob. A link stays readable and hand-editable, unknown keys from a newer
+build are ignored rather than poisoning the parse, and absent keys fall back to the app's
+defaults — so links keep working as fields are added. The `v` key is also how a share link
+is told apart from the legacy `?demo` flags, which still work.
+
+The spacecraft travels as its **TLE text**, not its NORAD id. Re-fetching by id would hand
+the recipient whatever CelesTrak serves *that day* — a different orbit from the one the
+sender was looking at. The TLE costs ~180 characters percent-encoded (spaces as `+`, since
+a TLE is nearly a quarter spaces); a fully-loaded link lands around 320, well inside every
+practical limit.
+
+"The view" is taken literally and includes camera yaw/pitch/distance, scrub time, playback
+rate, and the view frame, not just the scenario. Solver *inputs* are carried but the
+candidate table is not: it is derived, costs real time to produce, and would dominate the
+link — the recipient presses Solve.
+
+Two limits worth naming. The address bar is written with `replaceState` and left alone
+while playback runs: `t` would change continuously and browsers rate-limit the call
+(Safari at roughly 100 per 30 s). The link resource itself stays live, so "Copy link"
+always yields the current view and the address bar catches up on pause. And the rebuild is
+throttled to 4 Hz rather than driven by change detection, because the camera is a
+component the orbit controller rewrites every frame.
+
+Decoding is pure and lives in `share.rs` so it round-trips under native `cargo test`,
+including hostile input — `nan`, `inf`, truncated rows, bad percent-escapes — none of
+which may reach the integrator. The native binary takes a link as its first CLI argument,
+which keeps that decode path live on both targets instead of dead code behind a `cfg`.
